@@ -5,9 +5,9 @@ from typing import Dict, Any, List, Tuple
 import numpy as np
 import torch
 
-from utils.data_loading import create_dataloaders_grouped
-from utils.training import train_model, evaluate_model
-from models import LSTMForecast, TimeSeriesTransformer, CNNTransformerHybrid, LLaMATimeSeries
+from src.utils.data_loading import create_dataloaders_grouped
+from src.utils.training import train_model, evaluate_model
+from src.models import LSTMForecast, TimeSeriesTransformer, CNNTransformerHybrid, LLaMATimeSeries
 
 
 # -------------------------

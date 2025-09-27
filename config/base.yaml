@@ -1,0 +1,76 @@
+# configs/example.yaml
+
+seed: 123
+device: cuda          # "cuda" or "cpu"
+results_base: results
+save_predictions: false
+
+run:
+  model: all          # "lstm" | "transformer" | "cnn_transformer" | "llama_ts" | "all"
+
+dataloaders:
+  csv_file: /content/drive/MyDrive/unisolar/Solar_Power_Weather_Clean_MASTER.csv
+  target_col: y_norm
+  feature_cols:
+    - CampusKey_encoded
+    - SiteKey_encoded
+    - hour_sin
+    - hour_cos
+    - dow_sin
+    - dow_cos
+    - month_sin
+    - month_cos
+    - ApparentTemperature
+    - AirTemperature
+    - DewPointTemperature
+    - RelativeHumidity
+    - WindSpeed
+    - WindDirection
+    - DC_Capacity_kWp
+    - site_max
+  lookback: 24
+  horizon: 1
+  batch_size: 128
+  train_frac: 0.7
+  val_frac: 0.2
+  num_workers: 0
+  pin_memory: false
+  shuffle_train: true
+
+training:
+  epochs: 50
+  lr: 0.001
+  weight_decay: 0.0001
+  early_stop_patience: 15
+  early_stop_min_delta: 0.0
+
+models:
+  lstm:
+    name: LSTMForecast
+    hidden_size: 128
+    num_layers: 2
+    dropout: 0.2
+
+  transformer:
+    name: TimeSeriesTransformer
+    num_heads: 8        # input_size must be divisible by this
+    hidden_dim: 128
+    num_layers: 4
+    dropout: 0.1
+
+  cnn_transformer:
+    name: CNNTransformerHybrid
+    cnn_out_channels: 64
+    kernel_size: 3
+    num_heads: 8
+    hidden_dim: 128
+    num_layers: 4
+    dropout: 0.1
+
+  llama_ts:
+    name: LLaMATimeSeries
+    d_model: 128
+    n_heads: 8
+    n_layers: 4
+    dropout: 0.1
+    max_seq_len: 48

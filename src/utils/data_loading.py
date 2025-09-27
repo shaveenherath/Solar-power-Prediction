@@ -9,7 +9,7 @@ import pandas as pd
 from typing import Tuple, List, Optional
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, Subset
-from datasets.solar_dataset import SolarDatasetGrouped
+from src.dataset import SolarDatasetGrouped
 
 
 def compute_time_cutoffs(

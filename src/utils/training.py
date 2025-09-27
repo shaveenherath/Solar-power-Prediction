@@ -94,7 +94,7 @@ def train_model(
 
             optimizer.zero_grad()
             y_hat = model(X)
-            y_hat = torch.clamp(y_hat, min=0.0)  # predictions must be non-negative
+            #y_hat = torch.clamp(y_hat, min=0.0)  # predictions must be non-negative
 
             # If model outputs (B, 1), squeeze to (B,)
             if y_hat.ndim > 1 and y_hat.size(-1) == 1:

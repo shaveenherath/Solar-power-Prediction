@@ -1,33 +1,34 @@
 # configs/example.yaml
 
 seed: 123
-device: cuda          # "cuda" or "cpu"
-results_base: results
+device: cuda                 # "cuda" or "cpu"
+results_base: results/enc/cyclic
 save_predictions: false
 
 run:
-  model: all          # "lstm" | "transformer" | "cnn_transformer" | "llama_ts" | "all"
+  model: all                 # "lstm" | "transformer" | "cnn_transformer" | "llama_ts" | "all"
+
+time_encoding:
+  scheme: cyclic             # basic|none|cyclic|sinusoidal|fourier
+  params:
+    # for sinusoidal: d_hour: 8, d_dow: 8, d_mon: 8, prefix: "pe"
+    # for fourier:    k_hour: 3, k_dow: 2, k_mon: 2, prefix: "fourier"
+
+# --- OPTIONAL: lag/rolling features (off by default) ---
+lag_features:
+  cols: []                   # [] => auto-pick numeric base features
+  lags: []                   # e.g., [1,2,3]
+  windows: []                # e.g., [3,6]
 
 dataloaders:
-  csv_file: /content/drive/MyDrive/unisolar/Solar_Power_Weather_Clean_MASTER.csv
+  csv_file: data/Solar_Power_Weather_Clean_MASTER.csv
   target_col: y_norm
+  # base features FROM MASTER ONLY (no engineered time cols here)
   feature_cols:
-    - CampusKey_encoded
-    - SiteKey_encoded
-    - hour_sin
-    - hour_cos
-    - dow_sin
-    - dow_cos
-    - month_sin
-    - month_cos
     - ApparentTemperature
     - AirTemperature
     - DewPointTemperature
     - RelativeHumidity
-    - WindSpeed
-    - WindDirection
-    - DC_Capacity_kWp
-    - site_max
   lookback: 24
   horizon: 1
   batch_size: 128
@@ -41,7 +42,7 @@ training:
   epochs: 50
   lr: 0.001
   weight_decay: 0.0001
-  early_stop_patience: 15
+  early_stop_patience: 5
   early_stop_min_delta: 0.0
 
 models:
@@ -53,7 +54,9 @@ models:
 
   transformer:
     name: TimeSeriesTransformer
-    num_heads: 8        # input_size must be divisible by this
+    # NOTE: input_size == len(dataloaders.feature_cols) + time-encoding dims (+ lag dims)
+    # must be divisible by num_heads
+    num_heads: 8
     hidden_dim: 128
     num_layers: 4
     dropout: 0.1
@@ -74,3 +77,9 @@ models:
     n_layers: 4
     dropout: 0.1
     max_seq_len: 48
+
+# --- optional plotting prefs used by test.py ---
+plot:
+  zoom_start_idx: 0
+  zoom_length: 500
+  # time-of-day bars are produced by test.py snippet you added

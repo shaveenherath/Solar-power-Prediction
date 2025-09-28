@@ -6,10 +6,51 @@
 from __future__ import annotations
 import numpy as np
 import pandas as pd
-from typing import Iterable, Tuple, Optional
+from typing import Iterable, Tuple, Optional, Dict, Any, List
 import torch
 from torch.utils.data import Dataset
 from sklearn.preprocessing import StandardScaler
+
+from src.utils.time_encoding import apply_time_encoding  # NEW
+
+
+def _make_lag_features(
+    df: pd.DataFrame,
+    base_cols: List[str],
+    lags: List[int] | None = None,
+    windows: List[int] | None = None,
+    group_cols: Tuple[str, str] = ("CampusKey","SiteKey"),
+) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    Optional: create lagged/rolling features for numeric base columns (NOT the target).
+    This is OFF by default; only used if lags/windows provided.
+    """
+    if not lags and not windows:
+        return df, []
+
+    df = df.sort_values(list(group_cols) + ["Timestamp"]).copy()
+    new_cols: List[str] = []
+
+    # group-wise ops to avoid leakage across sites
+    gobj = df.groupby(list(group_cols), sort=False, group_keys=False)
+
+    # lags
+    if lags:
+        for col in base_cols:
+            for L in lags:
+                name = f"{col}_lag{L}"
+                df[name] = gobj[col].shift(L)
+                new_cols.append(name)
+
+    # rolling means (use centered=False to keep causality)
+    if windows:
+        for col in base_cols:
+            for W in windows:
+                name = f"{col}_rollmean{W}"
+                df[name] = gobj[col].rolling(window=W, min_periods=W).mean().reset_index(level=list(range(len(group_cols))), drop=True)
+                new_cols.append(name)
+
+    return df, new_cols
 
 
 class SolarDatasetGrouped(Dataset):
@@ -18,13 +59,17 @@ class SolarDatasetGrouped(Dataset):
     Target is a single-step (or horizon-step) scalar for each window.
 
     Args:
-        csv_file: Path to master CSV (must include Timestamp, CampusKey, SiteKey, target_col, feature_cols)
-        feature_cols: list of feature column names
-        target_col: target column name (e.g., 'y_norm')
-        lookback: number of past timesteps per sample
-        horizon: predict the value at t + horizon (1 = next step)
-        group_cols: columns defining groups (default: ('CampusKey','SiteKey'))
-        scaler: fitted StandardScaler for features; if None, raw features are used (no scaling)
+        csv_file: path to master CSV
+        feature_cols: list of "base" feature names (time encodings/lag features may be appended here)
+        target_col: target name (e.g., 'y_norm')
+        lookback: steps in the past per sample
+        horizon: predict value at t + horizon (1 = next step)
+        group_cols: group keys
+        scaler: fitted StandardScaler for features; if None, raw features are used
+        time_encoding: dict with {scheme, params} (see utils/time_encoding.py). None => no time columns
+        lag_cfg: optional dict: {"cols": [...], "lags": [1,2], "windows": [3,6]}
+                 Default None => no lag features
+        verbose: print drop stats
     """
     def __init__(
         self,
@@ -35,31 +80,75 @@ class SolarDatasetGrouped(Dataset):
         horizon: int = 1,
         group_cols: Tuple[str, str] = ("CampusKey", "SiteKey"),
         scaler: Optional[StandardScaler] = None,
+        time_encoding: Dict[str, Any] | None = None,      # NEW
+        lag_cfg: Dict[str, Any] | None = None,            # NEW
+        verbose: bool = True,
     ):
+        # ---------- Load + basic sort ----------
         df = pd.read_csv(csv_file, parse_dates=["Timestamp"])
         df = df.sort_values(list(group_cols) + ["Timestamp"]).reset_index(drop=True)
 
-        self.feature_cols = list(feature_cols)
+        base_feature_cols = list(feature_cols)  # start with user-selected features
+        all_feature_cols  = base_feature_cols.copy()
+
+        # ---------- Time encoding (Ablations) ----------
+        df, time_cols = apply_time_encoding(df, time_encoding)
+        all_feature_cols += time_cols
+
+        # ---------- Optional lag features ----------
+        if lag_cfg:
+            lag_cols = lag_cfg.get("cols", [])
+            lags     = lag_cfg.get("lags", [])
+            windows  = lag_cfg.get("windows", [])
+            # by default, if cols unspecified, use numeric base features (NOT target)
+            if not lag_cols:
+                lag_cols = [c for c in base_feature_cols if pd.api.types.is_numeric_dtype(df[c])]
+            df, new_lag_cols = _make_lag_features(
+                df, base_cols=lag_cols, lags=lags, windows=windows, group_cols=group_cols
+            )
+            all_feature_cols += new_lag_cols
+
+        # ---------- Drop rows with NaNs in target ----------
+        n0 = len(df)
+        df = df.dropna(subset=[target_col]).copy()
+        if verbose:
+            print(f"[NaN drop] Target '{target_col}': {n0} -> {len(df)} rows")
+
+        # ---------- Drop rows with NaNs in selected features ----------
+        # Keep only columns we actually plan to feed to the model
+        all_feature_cols = list(dict.fromkeys(all_feature_cols))  # de-dup
+        missing = [c for c in all_feature_cols if c not in df.columns]
+        if missing:
+            raise ValueError(f"Selected feature(s) not found in data: {missing}")
+
+        n1 = len(df)
+        df_feat = df[all_feature_cols]
+        na_mask = df_feat.isna().any(axis=1)
+        n_drop = int(na_mask.sum())
+        if n_drop > 0:
+            df = df.loc[~na_mask].copy()
+        if verbose:
+            print(f"[NaN drop] Features {len(all_feature_cols)} cols: {n1} -> {len(df)} rows (dropped {n_drop})")
+
+        # ---------- Keep reference & feature matrix ----------
+        self.df = df
+        self.feature_cols = all_feature_cols
         self.target_col   = target_col
         self.lookback     = int(lookback)
         self.horizon      = int(horizon)
         self.group_cols   = list(group_cols)
 
-        # Keep original df for reference (e.g., mapping timestamps/capacities if needed)
-        self.df = df
-
-        # Transform features (using pre-fitted scaler if provided)
+        # ---------- Transform features (external scaler) ----------
         if scaler is not None:
             F_all = scaler.transform(df[self.feature_cols].values)
         else:
             F_all = df[self.feature_cols].values
 
-        if np.isnan(F_all).any():
-            print(f"Warning: {np.isnan(F_all).sum()} NaN values found in features after scaling.")
+        if np.isnan(F_all).any() and verbose:
+            print(f"Warning: {np.isnan(F_all).sum()} NaNs found in features after scaling.")
 
-        self.seq_X, self.seq_y, self.seq_t = [], [], []  # X, y, sequence-end timestamp
-
-        # Build sequences per group to avoid cross-group leakage
+        # ---------- Build sequences per group (no leakage) ----------
+        self.seq_X, self.seq_y, self.seq_t = [], [], []
         start_idx = 0
         for _, g in df.groupby(self.group_cols, sort=False):
             n = len(g)
@@ -71,11 +160,12 @@ class SolarDatasetGrouped(Dataset):
             y = g[self.target_col].values
             t = g["Timestamp"].values
 
-            if np.isnan(y).any():
-                key = g[self.group_cols].iloc[0].tolist()
-                print(f"Warning: {np.isnan(y).sum()} NaNs in target for group {key} before sequence creation.")
-
             L, H = self.lookback, self.horizon
+            # if any target NaNs slipped through, warn:
+            if np.isnan(y).any() and verbose:
+                key = g[self.group_cols].iloc[0].tolist()
+                print(f"Warning: {np.isnan(y).sum()} NaNs in target for group {key} (post-clean).")
+
             for i in range(n - L - H + 1):
                 self.seq_X.append(F[i:i + L])
                 self.seq_y.append(y[i + L + H - 1])
@@ -87,9 +177,11 @@ class SolarDatasetGrouped(Dataset):
         self.seq_y = np.asarray(self.seq_y, dtype=np.float32)     # (N,)
         self.seq_t = np.asarray(self.seq_t)                        # datetime64
 
+        if verbose:
+            print(f"[Sequences] Built: N={len(self.seq_X)} | L={self.lookback} | D={self.seq_X.shape[-1] if len(self.seq_X)>0 else 'NA'}")
+
     def __len__(self) -> int:
         return len(self.seq_X)
 
     def __getitem__(self, idx: int):
-        # Returns: (X: [L, D], y: [])
         return torch.tensor(self.seq_X[idx]), torch.tensor(self.seq_y[idx])

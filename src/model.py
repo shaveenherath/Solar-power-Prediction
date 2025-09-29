@@ -45,6 +45,8 @@ def _select_device(pref: str = "cuda") -> str:
 
 def _build_dataloaders(cfg: Dict[str, Any]):
     dl = cfg["dataloaders"]
+    te = cfg["time_encoding"]
+    lf = cfg["lag_features"]
     return create_dataloaders_grouped(
         csv_file=dl["csv_file"],
         feature_cols=dl["feature_cols"],
@@ -57,6 +59,9 @@ def _build_dataloaders(cfg: Dict[str, Any]):
         num_workers=dl.get("num_workers", 0),
         pin_memory=dl.get("pin_memory", False),
         shuffle_train=dl.get("shuffle_train", True),
+        time_encoding=te ,
+        lag_cfg=lf 
+
     )
 
 
@@ -77,7 +82,7 @@ def _init_model(model_name: str, input_size: int, model_cfg: Dict[str, Any]) -> 
     if model_name == "transformer":
         return MODEL_REGISTRY[model_name](
             input_size=input_size,  # must be divisible by num_heads
-            num_heads=model_cfg.get("num_heads", 8),
+            num_heads=model_cfg.get("num_heads", int(input_size/2)),
             hidden_dim=model_cfg.get("hidden_dim", 128),
             num_layers=model_cfg.get("num_layers", 6),
             dropout=model_cfg.get("dropout", 0.1),
@@ -117,8 +122,9 @@ def run_single_model(cfg: Dict[str, Any], model_key: str) -> Dict[str, Any]:
     device = _select_device(cfg.get("device", "cuda"))
 
     # --- data ---
-    train_loader, val_loader, test_loader, scaler, (idx_tr, idx_va, idx_te) = _build_dataloaders(cfg)
-    input_size = len(cfg["dataloaders"]["feature_cols"])
+    train_loader, val_loader, test_loader, feature_cols, scaler, (idx_tr, idx_va, idx_te) = _build_dataloaders(cfg)
+    input_size = len(feature_cols)
+    
 
     # --- model + train settings ---
     model_cfg_all = cfg.get("models", {})
@@ -157,7 +163,7 @@ def run_single_model(cfg: Dict[str, Any], model_key: str) -> Dict[str, Any]:
     )
 
     # --- evaluation (test) ---
-    mae, rmse, preds, trues = evaluate_model(model, test_loader, device=device, denorm=None)
+    mae, rmse,r2, preds, trues = evaluate_model(model, test_loader, device=device, denorm=None)
 
     # Save eval summary
     summary = {
@@ -165,6 +171,7 @@ def run_single_model(cfg: Dict[str, Any], model_key: str) -> Dict[str, Any]:
         "device": device,
         "mae": float(mae),
         "rmse": float(rmse),
+        "r2" : float(r2),
         "n_test": int(len(trues)),
         "timestamp": int(time.time()),
     }

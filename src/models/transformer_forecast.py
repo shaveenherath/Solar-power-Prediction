@@ -11,6 +11,8 @@ class TimeSeriesTransformer(nn.Module):
     """
     def __init__(self, input_size: int, num_heads: int = 8, hidden_dim: int = 128, num_layers: int = 6, dropout: float = 0.1):
         super().__init__()
+        print("input" , input_size)
+        print("num of heads : " , num_heads)
         assert input_size % num_heads == 0, "input_size must be divisible by num_heads"
 
         encoder_layer = nn.TransformerEncoderLayer(

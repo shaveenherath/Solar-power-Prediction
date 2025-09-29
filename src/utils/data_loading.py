@@ -11,7 +11,7 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, Subset
 
 from src.dataset import SolarDatasetGrouped
-from src.utils.time_encoding import apply_time_encoding
+from src.utils.feature_engineering import make_features
 
 
 # ---------- time cutoffs ----------
@@ -122,28 +122,13 @@ def create_dataloaders_grouped(
     t1, t2 = compute_time_cutoffs(df_all["Timestamp"].values, train_frac, val_frac)
     train_mask_rows = df_all["Timestamp"].values <= t1
 
-    # 3) Apply time encoding to the ROW dataframe for scaler fit
-    df_all_enc, time_cols = apply_time_encoding(df_all, time_encoding)
-
-    # 4) Optional lag/rolling features (match dataset)
-    lag_cols = []
-    if lag_cfg:
-        use_cols = lag_cfg.get("cols", [])
-        lags     = lag_cfg.get("lags", [])
-        windows  = lag_cfg.get("windows", [])
-        if not use_cols:
-            # auto-pick numeric from the *base* features (avoid target)
-            use_cols = [c for c in feature_cols if c in df_all_enc.columns and pd.api.types.is_numeric_dtype(df_all_enc[c])]
-        df_all_enc, lag_cols = _make_lag_features_for_scaler(
-            df_all_enc, base_cols=use_cols, lags=lags, windows=windows, group_cols=("CampusKey","SiteKey")
-        )
-
-    # 5) Final feature list for scaler = base + time_enc + lag cols (de-duplicated, keep order)
-    seen = set()
-    feature_cols_final: List[str] = []
-    for c in list(feature_cols) + time_cols + lag_cols:
-        if c not in seen:
-            feature_cols_final.append(c); seen.add(c)
+    df_all_enc, feature_cols_final = make_features(
+        df_all,
+        base_cols=feature_cols,
+        time_encoding=time_encoding,
+        lag_cfg=lag_cfg,
+        group_cols=("CampusKey","SiteKey"),
+    )
 
     # sanity check
     missing = [c for c in feature_cols_final if c not in df_all_enc.columns]
@@ -194,4 +179,4 @@ def create_dataloaders_grouped(
         num_workers=num_workers, pin_memory=pin_memory, drop_last=False
     )
 
-    return train_loader, val_loader, test_loader, scaler, (idx_train, idx_val, idx_test)
+    return train_loader, val_loader, test_loader, ds_all.feature_cols , scaler, (idx_train, idx_val, idx_test)

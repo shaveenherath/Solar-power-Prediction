@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import Dataset
 from sklearn.preprocessing import StandardScaler
 
-from src.utils.time_encoding import apply_time_encoding  # NEW
+from src.utils.feature_engineering import make_features
 
 
 def _make_lag_features(
@@ -91,22 +91,12 @@ class SolarDatasetGrouped(Dataset):
         base_feature_cols = list(feature_cols)  # start with user-selected features
         all_feature_cols  = base_feature_cols.copy()
 
-        # ---------- Time encoding (Ablations) ----------
-        df, time_cols = apply_time_encoding(df, time_encoding)
-        all_feature_cols += time_cols
-
-        # ---------- Optional lag features ----------
-        if lag_cfg:
-            lag_cols = lag_cfg.get("cols", [])
-            lags     = lag_cfg.get("lags", [])
-            windows  = lag_cfg.get("windows", [])
-            # by default, if cols unspecified, use numeric base features (NOT target)
-            if not lag_cols:
-                lag_cols = [c for c in base_feature_cols if pd.api.types.is_numeric_dtype(df[c])]
-            df, new_lag_cols = _make_lag_features(
-                df, base_cols=lag_cols, lags=lags, windows=windows, group_cols=group_cols
-            )
-            all_feature_cols += new_lag_cols
+        df, all_feature_cols = make_features(
+            df, base_cols=list(feature_cols),
+            time_encoding=time_encoding,
+            lag_cfg=lag_cfg,
+            group_cols=group_cols,
+        )
 
         # ---------- Drop rows with NaNs in target ----------
         n0 = len(df)

@@ -1,12 +1,10 @@
-# configs/example.yaml
-
 seed: 123
 device: cuda                 # "cuda" or "cpu"
 results_base: results/enc/cyclic
 save_predictions: false
 
 run:
-  model: all                 # "lstm" | "transformer" | "cnn_transformer" | "llama_ts" | "all"
+  model: all                 # "lstm" | "transformer" | "cnn_transformer" | "llama_ts" | "cnn" | "cnn_lstm" | "bilstm" | "all"
 
 time_encoding:
   scheme: cyclic             # basic|none|cyclic|sinusoidal|fourier
@@ -29,11 +27,14 @@ dataloaders:
     - AirTemperature
     - DewPointTemperature
     - RelativeHumidity
+    - CampusKey
+    - SiteKey
+
   lookback: 24
   horizon: 1
   batch_size: 128
-  train_frac: 0.7
-  val_frac: 0.2
+  train_frac: 0.01
+  val_frac: 0.01
   num_workers: 0
   pin_memory: false
   shuffle_train: true
@@ -54,9 +55,6 @@ models:
 
   transformer:
     name: TimeSeriesTransformer
-    # NOTE: input_size == len(dataloaders.feature_cols) + time-encoding dims (+ lag dims)
-    # must be divisible by num_heads
-    num_heads: 8
     hidden_dim: 128
     num_layers: 4
     dropout: 0.1
@@ -78,8 +76,27 @@ models:
     dropout: 0.1
     max_seq_len: 48
 
+  cnn:
+    name: CNNTimeseries
+    num_filters: 64
+    kernel_size: 3
+    dropout: 0.1
+
+  cnn_lstm:
+    name: CNNLSTMTimeSeries
+    hidden_size: 64
+    num_layers: 1
+    cnn_filters: 32
+    kernel_size: 3
+    dropout: 0.1
+
+  bilstm:
+    name: BiLSTMTimeSeries
+    hidden_size: 64
+    num_layers: 1
+    dropout: 0.1
+
 # --- optional plotting prefs used by test.py ---
 plot:
   zoom_start_idx: 0
   zoom_length: 500
-  # time-of-day bars are produced by test.py snippet you added

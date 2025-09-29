@@ -1,24 +1,28 @@
 # test.py
 from __future__ import annotations
 import argparse, os, json
-from typing import Dict, Any
+from typing import Dict, Any, List
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+from sklearn.metrics import r2_score
 
+from src.utils.feature_engineering import make_features
 from src.utils.data_loading import create_dataloaders_grouped
 from src.dataset import SolarDatasetGrouped
-from src.models import LSTMForecast, TimeSeriesTransformer, CNNTransformerHybrid, LLaMATimeSeries
+from src.models import LSTMForecast, TimeSeriesTransformer, CNNTransformerHybrid, LLaMATimeSeries , CNNTimeseries , CNNLSTMTimeSeries , BiLSTMTimeSeries
 
 MODEL_REGISTRY = {
     "lstm": LSTMForecast,
     "transformer": TimeSeriesTransformer,
     "cnn_transformer": CNNTransformerHybrid,
     "llama_ts": LLaMATimeSeries,
+    "cnn": CNNTimeseries,
+    "cnn_lstm": CNNLSTMTimeSeries,
+    "bilstm": BiLSTMTimeSeries,
 }
-
 def _load_config(path: str) -> Dict[str, Any]:
     ext = os.path.splitext(path)[1].lower()
     if ext in [".yaml", ".yml"]:
@@ -28,13 +32,16 @@ def _load_config(path: str) -> Dict[str, Any]:
     elif ext == ".json":
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    raise SystemExit(f"Unsupported config extension '{ext}'. Use .yaml/.yml/.json")
+    raise SystemExit(f"Unsupported config extension '{ext}'")
 
 def _device(pref: str = "cuda") -> str:
     return pref if (pref == "cuda" and torch.cuda.is_available()) else "cpu"
 
 def _init_model(key: str, input_size: int, cfg: Dict[str, Any]) -> torch.nn.Module:
     key = key.lower()
+    if key not in MODEL_REGISTRY:
+        raise ValueError(f"Unknown model key: {key}")
+
     if key == "lstm":
         return MODEL_REGISTRY[key](
             input_size=input_size,
@@ -45,7 +52,7 @@ def _init_model(key: str, input_size: int, cfg: Dict[str, Any]) -> torch.nn.Modu
     if key == "transformer":
         return MODEL_REGISTRY[key](
             input_size=input_size,
-            num_heads=cfg.get("num_heads", 8),
+            num_heads=cfg.get("num_heads", int(input_size/2)),
             hidden_dim=cfg.get("hidden_dim", 128),
             num_layers=cfg.get("num_layers", 6),
             dropout=cfg.get("dropout", 0.1),
@@ -69,20 +76,47 @@ def _init_model(key: str, input_size: int, cfg: Dict[str, Any]) -> torch.nn.Modu
             dropout=cfg.get("dropout", 0.1),
             max_seq_len=cfg.get("max_seq_len", 48),
         )
-    raise ValueError(f"Unknown model key: {key}")
+        # Pure CNN
+    if key == "cnn":
+        return MODEL_REGISTRY[key](
+            input_size=input_size,
+            num_filters=cfg.get("num_filters", 64),
+            kernel_size=cfg.get("kernel_size", 3),
+            dropout=cfg.get("dropout", 0.1),
+        )
+
+    # CNN + LSTM
+    if key == "cnn_lstm":
+        return MODEL_REGISTRY[key](
+            input_size=input_size,
+            hidden_size=cfg.get("hidden_size", 64),
+            num_layers=cfg.get("num_layers", 1),
+            cnn_filters=cfg.get("cnn_filters", 32),
+            kernel_size=cfg.get("kernel_size", 3),
+            dropout=cfg.get("dropout", 0.1),
+        )
+
+    # Bidirectional LSTM
+    if key == "bilstm":
+        return MODEL_REGISTRY[key](
+            input_size=input_size,
+            hidden_size=cfg.get("hidden_size", 64),
+            num_layers=cfg.get("num_layers", 1),
+            dropout=cfg.get("dropout", 0.1),
+        )
+
 
 def _ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
 
 @torch.no_grad()
-def _predict_all(model: torch.nn.Module, test_loader, device: str):
+def _predict_all(model: torch.nn.Module, loader, device: str):
     model.to(device)
     model.eval()
     preds, trues = [], []
-    for X, y in test_loader:
+    for X, y in loader:
         X, y = X.to(device), y.to(device)
         y_pred = model(X)
-        # strict clamp as requested (evaluation-time; training already handled)
         y_pred = torch.clamp(y_pred, min=0.0)
         if y_pred.ndim > 1 and y_pred.size(-1) == 1:
             y_pred = y_pred.squeeze(-1)
@@ -120,8 +154,8 @@ def _plot_zoom(path: str, y_true, y_pred, start=0, length=500, title="Zoomed"):
     plt.close()
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate per-model + ensemble (clamp-based metrics)")
-    parser.add_argument("--config", type=str, required=True, help="Path to config (.yaml/.yml/.json)")
+    parser = argparse.ArgumentParser(description="Evaluate models")
+    parser.add_argument("--config", type=str, required=True, help="Path to config (.yaml/.json)")
     args = parser.parse_args()
 
     cfg = _load_config(args.config)
@@ -131,10 +165,24 @@ def main():
     compare_dir = os.path.join(results_base, "compare")
     _ensure_dir(plots_dir); _ensure_dir(compare_dir)
 
-    # Build loaders (we only need test_loader, but create all for consistency)
-    train_loader, val_loader, test_loader, scaler, (idx_tr, idx_va, idx_te) = create_dataloaders_grouped(
-        csv_file=cfg["dataloaders"]["csv_file"],
-        feature_cols=cfg["dataloaders"]["feature_cols"],
+    # --- Load raw data ---
+    df = pd.read_csv(cfg["dataloaders"]["csv_file"], parse_dates=["Timestamp"])
+    base_cols = cfg["dataloaders"]["feature_cols"]
+    time_enc_cfg = cfg.get("time_encoding", None)
+    lag_cfg = cfg.get("lag_cfg", None)
+
+    # --- Make features ---
+    df_feat, final_cols = make_features(df, base_cols, time_encoding=time_enc_cfg, lag_cfg=lag_cfg)
+    print("Final feature columns:", final_cols)
+
+    # --- Save to temp CSV ---
+    tmp_csv = os.path.join(results_base, "tmp_features.csv")
+    df_feat.to_csv(tmp_csv, index=False)
+
+    # --- Dataloaders ---
+    train_loader, val_loader, test_loader, _, scaler, (idx_tr, idx_va, idx_te) = create_dataloaders_grouped(
+        csv_file=tmp_csv,
+        feature_cols=final_cols,
         target_col=cfg["dataloaders"].get("target_col", "y_norm"),
         lookback=cfg["dataloaders"].get("lookback", 24),
         horizon=cfg["dataloaders"].get("horizon", 1),
@@ -145,29 +193,17 @@ def main():
         pin_memory=cfg["dataloaders"].get("pin_memory", False),
         shuffle_train=False,
     )
+    input_size = len(final_cols)
 
-    # For plotting with timestamps if needed:
-    ds_all = SolarDatasetGrouped(
-        csv_file=cfg["dataloaders"]["csv_file"],
-        feature_cols=cfg["dataloaders"]["feature_cols"],
-        target_col=cfg["dataloaders"].get("target_col", "y_norm"),
-        lookback=cfg["dataloaders"].get("lookback", 24),
-        horizon=cfg["dataloaders"].get("horizon", 1),
-        scaler=scaler,
-    )
-    # test_timestamps = ds_all.seq_t[idx_te]  # not used in current plots (index-based)
-
+    # --- Evaluate models ---
     run_which = cfg.get("run", {}).get("model", "all")
     model_cfgs = cfg.get("models", {})
     model_keys = list(model_cfgs.keys()) if run_which == "all" else [run_which]
-
-    input_size = len(cfg["dataloaders"]["feature_cols"])
 
     all_preds: Dict[str, np.ndarray] = {}
     ytrue_all = None
     results_list = []
 
-    # --- Evaluate each model (using best.pt) ---
     for key in model_keys:
         mcfg = model_cfgs.get(key, {})
         model_name = mcfg.get("name", key)
@@ -178,7 +214,7 @@ def main():
         if not os.path.exists(best_ckpt):
             raise FileNotFoundError(f"Missing checkpoint for {model_name}: {best_ckpt}")
 
-        state = torch.load(best_ckpt, map_location=device) if hasattr(torch.load, "__call__") else torch.load(best_ckpt, map_location=device)
+        state = torch.load(best_ckpt, map_location=device)
         model.load_state_dict(state["model_state"], strict=False)
 
         y_pred_all, y_true = _predict_all(model, test_loader, device=device)
@@ -189,50 +225,40 @@ def main():
 
         mae = float(np.mean(np.abs(y_pred_all - y_true)))
         rmse = float(np.sqrt(np.mean((y_pred_all - y_true) ** 2)))
-        # your requested %Error definition:
-        perc_err = float((rmse / max(1e-12, y_true.mean())) * 100.0)
+        r2 = float(r2_score(y_true, y_pred_all))
+        print(f"{model_name} | MAE: {mae:.4f} | RMSE: {rmse:.4f} | R2: {r2:.4f}")
+        results_list.append({"Model": model_name, "MAE": mae, "RMSE": rmse, "R2": r2})
 
-        print(f"{model_name} | MAE: {mae:.4f} | RMSE: {rmse:.4f} | %Error: {perc_err:.2f}%")
-        results_list.append({"Model": model_name, "MAE": mae, "RMSE": rmse, "%Error": perc_err})
-
-        # Plots per model
-        _plot_series(os.path.join(plots_dir, f"{model_name}_full.png"),
-                     y_true, y_pred_all, title=f"{model_name}: Actual vs Predicted (Full)")
+        _plot_series(os.path.join(plots_dir, f"{model_name}_full.png"), y_true, y_pred_all,
+                     title=f"{model_name}: Actual vs Predicted (Full)")
         zoom_cfg = cfg.get("plot", {})
-        _plot_zoom(os.path.join(plots_dir, f"{model_name}_zoom.png"),
-                   y_true, y_pred_all,
+        _plot_zoom(os.path.join(plots_dir, f"{model_name}_zoom.png"), y_true, y_pred_all,
                    start=int(zoom_cfg.get("zoom_start_idx", 0)),
                    length=int(zoom_cfg.get("zoom_length", 500)),
                    title=f"{model_name}: Actual vs Predicted (Zoom)")
 
-    # --- Ensemble (simple average over available model preds) ---
+    # --- Ensemble ---
     if len(all_preds) >= 2:
-        stacked = np.stack([pred for pred in all_preds.values()], axis=0)  # [M, N]
+        stacked = np.stack(list(all_preds.values()), axis=0)
         y_ens = stacked.mean(axis=0)
         mae = float(np.mean(np.abs(y_ens - ytrue_all)))
         rmse = float(np.sqrt(np.mean((y_ens - ytrue_all) ** 2)))
-        perc_err = float((rmse / max(1e-12, ytrue_all.mean())) * 100.0)
-        print(f"\n✅ Ensemble | MAE: {mae:.4f} | RMSE: {rmse:.4f} | %Error: {perc_err:.2f}%")
-        results_list.append({"Model": "Ensemble", "MAE": mae, "RMSE": rmse, "%Error": perc_err})
+        r2 = float(r2_score(ytrue_all, y_ens))
+        print(f"\n✅ Ensemble | MAE: {mae:.4f} | RMSE: {rmse:.4f} | R2: {r2:.4f}")
+        results_list.append({"Model": "Ensemble", "MAE": mae, "RMSE": rmse, "R2": r2})
 
-        # Ensemble plots
-        _plot_series(os.path.join(plots_dir, "Ensemble_full.png"),
-                     ytrue_all, y_ens, title="Ensemble: Actual vs Predicted (Full)")
-        zoom_cfg = cfg.get("plot", {})
-        _plot_zoom(os.path.join(plots_dir, "Ensemble_zoom.png"),
-                   ytrue_all, y_ens,
+        _plot_series(os.path.join(plots_dir, "Ensemble_full.png"), ytrue_all, y_ens, title="Ensemble: Actual vs Predicted (Full)")
+        _plot_zoom(os.path.join(plots_dir, "Ensemble_zoom.png"), ytrue_all, y_ens,
                    start=int(zoom_cfg.get("zoom_start_idx", 0)),
                    length=int(zoom_cfg.get("zoom_length", 500)),
                    title="Ensemble: Actual vs Predicted (Zoom)")
-    else:
-        print("\nEnsemble skipped (need >= 2 models).")
 
-    # --- Save comparison CSV (sorted by RMSE) ---
     compare_csv = os.path.join(compare_dir, "ensemble_model_comparison.csv")
     results_df = pd.DataFrame(results_list).sort_values("RMSE")
     results_df.to_csv(compare_csv, index=False)
     print(f"\n✅ Results saved: {compare_csv}")
     print(results_df.to_string(index=False))
+
 
 if __name__ == "__main__":
     main()

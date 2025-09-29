@@ -65,12 +65,12 @@ def _build_dataloaders(cfg: Dict[str, Any]):
     )
 
 
-def _init_model(model_name: str, input_size: int, model_cfg: Dict[str, Any]) -> torch.nn.Module:
+def _init_model(model_name: str, input_size: int, model_cfg: dict) -> torch.nn.Module:
     model_name = model_name.lower()
     if model_name not in MODEL_REGISTRY:
         raise ValueError(f"Unknown model '{model_name}'. Available: {list(MODEL_REGISTRY)}")
 
-    # Provide sensible defaults per model class
+    # LSTM
     if model_name == "lstm":
         return MODEL_REGISTRY[model_name](
             input_size=input_size,
@@ -79,15 +79,17 @@ def _init_model(model_name: str, input_size: int, model_cfg: Dict[str, Any]) -> 
             dropout=model_cfg.get("dropout", 0.2),
         )
 
+    # Transformer
     if model_name == "transformer":
         return MODEL_REGISTRY[model_name](
-            input_size=input_size,  # must be divisible by num_heads
-            num_heads=model_cfg.get("num_heads", int(input_size/2)),
+            input_size=input_size,
+            num_heads=model_cfg.get("num_heads", max(1, input_size // 2)),
             hidden_dim=model_cfg.get("hidden_dim", 128),
             num_layers=model_cfg.get("num_layers", 6),
             dropout=model_cfg.get("dropout", 0.1),
         )
 
+    # CNN + Transformer Hybrid
     if model_name == "cnn_transformer":
         return MODEL_REGISTRY[model_name](
             input_size=input_size,
@@ -99,6 +101,7 @@ def _init_model(model_name: str, input_size: int, model_cfg: Dict[str, Any]) -> 
             dropout=model_cfg.get("dropout", 0.1),
         )
 
+    # LLaMA Time Series
     if model_name == "llama_ts":
         return MODEL_REGISTRY[model_name](
             n_features=input_size,
@@ -109,8 +112,38 @@ def _init_model(model_name: str, input_size: int, model_cfg: Dict[str, Any]) -> 
             max_seq_len=model_cfg.get("max_seq_len", 48),
         )
 
-    # Shouldn’t reach here
-    raise RuntimeError("Model init fell through")
+    # Pure CNN
+    if model_name == "cnn":
+        return MODEL_REGISTRY[model_name](
+            input_size=input_size,
+            num_filters=model_cfg.get("num_filters", 64),
+            kernel_size=model_cfg.get("kernel_size", 3),
+            dropout=model_cfg.get("dropout", 0.1),
+        )
+
+    # CNN + LSTM
+    if model_name == "cnn_lstm":
+        return MODEL_REGISTRY[model_name](
+            input_size=input_size,
+            hidden_size=model_cfg.get("hidden_size", 64),
+            num_layers=model_cfg.get("num_layers", 1),
+            cnn_filters=model_cfg.get("cnn_filters", 32),
+            kernel_size=model_cfg.get("kernel_size", 3),
+            dropout=model_cfg.get("dropout", 0.1),
+        )
+
+    # Bidirectional LSTM
+    if model_name == "bilstm":
+        return MODEL_REGISTRY[model_name](
+            input_size=input_size,
+            hidden_size=model_cfg.get("hidden_size", 64),
+            num_layers=model_cfg.get("num_layers", 1),
+            dropout=model_cfg.get("dropout", 0.1),
+        )
+
+    # Fallback
+    raise RuntimeError(f"Failed to initialize model '{model_name}'")
+
 
 
 def run_single_model(cfg: Dict[str, Any], model_key: str) -> Dict[str, Any]:

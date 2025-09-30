@@ -7,7 +7,7 @@ import torch
 
 from src.utils.data_loading import create_dataloaders_grouped
 from src.utils.training import train_model, evaluate_model
-from src.models import LSTMForecast, TimeSeriesTransformer, CNNTransformerHybrid, LLaMATimeSeries
+from src.models import LSTMForecast, TimeSeriesTransformer, CNNTransformerHybrid, LLaMATimeSeries , CNNTimeseries , CNNLSTMTimeSeries , BiLSTMTimeSeries
 
 
 # -------------------------
@@ -18,7 +18,11 @@ MODEL_REGISTRY = {
     "transformer": TimeSeriesTransformer,
     "cnn_transformer": CNNTransformerHybrid,
     "llama_ts": LLaMATimeSeries,
+    "cnn": CNNTimeseries,
+    "cnn_lstm": CNNLSTMTimeSeries,
+    "bilstm": BiLSTMTimeSeries,
 }
+
 
 
 def _ensure_dirs(path: str):
